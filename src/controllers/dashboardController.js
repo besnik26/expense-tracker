@@ -1,12 +1,34 @@
 const Transaction = require('../models/Transaction');
 
+
+const now = new Date()
+
+const startOfMonth = new Date(
+  now.getFullYear(),
+  now.getMonth(),
+  1
+);
+
+const startOfNextMonth = new Date(
+  now.getFullYear(),
+  now.getMonth() + 1,
+  1
+);
+
 const getDashboard = async (req, res, next) => {
   try {
     const userId = req.user._id;
 
     const [totals, recentTransactions] = await Promise.all([
       Transaction.aggregate([
-        { $match: { userId } },
+        { $match: { 
+            userId,
+            date:{
+              $gte:startOfMonth,
+              $lt:startOfNextMonth
+            }
+          } 
+        },
         {
           $group: {
             _id: null,
