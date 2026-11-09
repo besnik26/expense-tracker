@@ -2,9 +2,11 @@ const Transaction = require("../models/Transaction");
 
 const now = new Date();
 
-const sixMonthsAgo = new Date();
-
-sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+const sixMonthsAgo = new Date(
+  now.getFullYear(),
+  now.getMonth() - 5,
+  1
+);
 
 
 
@@ -12,7 +14,7 @@ const getAnalytics = async (req, res, next) => {
   try {
     const userId = req.user._id;
 
-    const [totals, monthlyResults] = await Promise.all([
+    const [totals, monthlyResults, expenseBreakdown] = await Promise.all([
       Transaction.aggregate([
         { $match: { userId } },
         {
@@ -45,7 +47,8 @@ const getAnalytics = async (req, res, next) => {
             _id: {
               $dateTrunc:{
                 date:"$date",
-                unit:"month"
+                unit:"month",
+                timezone: "Europe/Belgrade"
               }
             },
             totalIncome: {
@@ -66,8 +69,35 @@ const getAnalytics = async (req, res, next) => {
           }
         }
 
+      ]),
+
+      Transaction.aggregate([
+        {
+          $match:{
+            userId,
+            type:'expense',
+            date:{
+              $gte:sixMonthsAgo,
+              $lt: now,
+            }
+          }
+        },
+        {
+          $group:{
+            _id:"$category",
+            totalSpent:{$sum:'$amount'}
+          }
+        },
+        {
+          $sort:{
+            totalSpent:-1
+          }
+        }
       ])
     ]);
+
+    const summary = totals[0] || { totalIncome: 0, totalExpenses: 0 };
+
 
     const months = [];
 
@@ -91,7 +121,28 @@ const getAnalytics = async (req, res, next) => {
       };
     });
 
-    const summary = totals[0] || { totalIncome: 0, totalExpenses: 0 };
+
+    //Expense Breakdown code
+    const expenseAnalytics = () =>{
+      const grandTotal = expenseBreakdown.reduce((transformedValue,value)=>{
+         return transformedValue + value.totalSpent
+      }, 0)
+
+      const breakdownPercentage =  expenseBreakdown.map((value)=>{
+        const percentage = grandTotal === 0 ? 0 : (value.totalSpent / grandTotal) * 100;
+
+
+        return {
+          ...value,
+          percentage
+        }
+      })
+
+      return breakdownPercentage;
+    }
+
+
+    const expenseBreakdownAnalytics = expenseAnalytics();
 
     return res.status(200).json({
       success: true,
@@ -99,7 +150,8 @@ const getAnalytics = async (req, res, next) => {
         totalIncome: summary.totalIncome || 0,
         totalExpenses: summary.totalExpenses || 0,
         totalBalance: (summary.totalIncome || 0) - (summary.totalExpenses || 0),
-        monthlyAnalytics
+        monthlyAnalytics,
+        expenseBreakdownAnalytics
       },
     });
     
