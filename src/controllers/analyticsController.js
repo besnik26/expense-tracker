@@ -14,7 +14,7 @@ const getAnalytics = async (req, res, next) => {
   try {
     const userId = req.user._id;
 
-    const [totals, monthlyResults, expenseBreakdown] = await Promise.all([
+    const [totals, monthlyResults, expenseBreakdown, savingTrend] = await Promise.all([
       Transaction.aggregate([
         { $match: { userId } },
         {
@@ -93,7 +93,59 @@ const getAnalytics = async (req, res, next) => {
             totalSpent:-1
           }
         }
+      ]),
+
+      Transaction.aggregate([
+        {
+          $match:{
+            userId,
+            date:{
+              $gte:sixMonthsAgo,
+              $lt: now
+            }
+          }
+        },
+        {
+          $group:{
+            _id:{
+              $dateTrunc:{
+                date:"$date",
+                unit:"month",
+                timezone: "Europe/Belgrade"
+              }
+            },
+            totalIncome: {
+              $sum: {
+                $cond: [{$eq: ['$type', 'income']}, '$amount', 0]
+              }
+            },
+            totalExpenses: {
+              $sum:{
+                $cond: [{$eq: ['$type', 'expense']}, '$amount', 0]
+              }
+            }
+
+          }
+        },
+        {
+           $project: {
+            _id: 1,
+            netSavings: {
+              $subtract: ["$totalIncome", "$totalExpenses"]
+            }
+          }
+        },
+        {
+          $sort:{
+            _id:1
+          }
+        }
+        
       ])
+
+
+
+
     ]);
 
     const summary = totals[0] || { totalIncome: 0, totalExpenses: 0 };
@@ -144,6 +196,48 @@ const getAnalytics = async (req, res, next) => {
 
     const expenseBreakdownAnalytics = expenseAnalytics();
 
+
+    //saving trend codee
+
+    const getMonthKey = (date) => {
+      const parts = new Intl.DateTimeFormat("en", {
+        timeZone: "Europe/Belgrade",
+        year: "numeric",
+        month: "2-digit"
+      }).formatToParts(date);
+
+      const year = parts.find(p => p.type === "year").value;
+      const month = parts.find(p => p.type === "month").value;
+
+      return `${year}-${month}`;
+    };
+
+    const currentParts = getMonthKey(now).split("-");
+
+    const year = Number(currentParts[0]);
+    const savingMonth = Number(currentParts[1]) - 1;
+
+    const savingMonths = [];
+
+    for (let i = 5; i >= 0; i--) {
+      const date = new Date(Date.UTC(year, savingMonth - i, 1));
+
+      savingMonths.push(getMonthKey(date));
+    }
+
+
+    const resultsMap = new Map(
+      savingTrend.map(item => [
+        getMonthKey(item._id),
+        item.netSavings
+      ])
+    );
+
+    const savingTrendAnalytics = savingMonths.map(month => ({
+      month,
+      netSavings: resultsMap.get(month) ?? 0
+    }));
+
     return res.status(200).json({
       success: true,
       data: {
@@ -151,7 +245,8 @@ const getAnalytics = async (req, res, next) => {
         totalExpenses: summary.totalExpenses || 0,
         totalBalance: (summary.totalIncome || 0) - (summary.totalExpenses || 0),
         monthlyAnalytics,
-        expenseBreakdownAnalytics
+        expenseBreakdownAnalytics,
+        savingTrendAnalytics
       },
     });
     
