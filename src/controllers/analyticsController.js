@@ -1,17 +1,33 @@
+
 const Transaction = require("../models/Transaction");
 
-const now = new Date();
-const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
 const TIMEZONE = "Europe/Belgrade";
 
-const buildMonthlyTotalsPipeline = (userId, includeNetSavings = false) => {
+const getDateRange = (months) => {
+  const now = new Date();
+
+  const startDate = new Date(
+    now.getFullYear(),
+    now.getMonth() - (months - 1),
+    1
+  );
+
+  return { now, startDate };
+};
+
+const buildMonthlyTotalsPipeline = (
+  userId,
+  startDate,
+  endDate,
+  includeNetSavings = false
+) => {
   const pipeline = [
     {
       $match: {
         userId,
         date: {
-          $gte: sixMonthsAgo,
-          $lt: now,
+          $gte: startDate,
+          $lt: endDate,
         },
       },
     },
@@ -54,12 +70,18 @@ const buildMonthlyTotalsPipeline = (userId, includeNetSavings = false) => {
   return pipeline;
 };
 
-const buildMonthList = (referenceDate = now, useUTC = false) => {
-  const year = useUTC ? referenceDate.getUTCFullYear() : referenceDate.getFullYear();
-  const monthIndex = useUTC ? referenceDate.getUTCMonth() : referenceDate.getMonth();
+const buildMonthList = (referenceDate = new Date(), months = 6, useUTC = false) => {
+  const year = useUTC
+    ? referenceDate.getUTCFullYear()
+    : referenceDate.getFullYear();
 
-  return Array.from({ length: 6 }, (_, index) => {
-    const offset = 5 - index;
+  const monthIndex = useUTC
+    ? referenceDate.getUTCMonth()
+    : referenceDate.getMonth();
+
+  return Array.from({ length: months }, (_, index) => {
+    const offset = months - 1 - index;
+
     const date = useUTC
       ? new Date(Date.UTC(year, monthIndex - offset, 1))
       : new Date(year, monthIndex - offset, 1);
@@ -85,66 +107,99 @@ const getAnalytics = async (req, res, next) => {
   try {
     const userId = req.user._id;
 
-    const [totals, monthlyResults, expenseBreakdown, savingTrend] = await Promise.all([
-      Transaction.aggregate([
-        { $match: { userId } },
-        {
-          $group: {
-            _id: null,
-            totalIncome: {
-              $sum: {
-                $cond: [{ $eq: ["$type", "income"] }, "$amount", 0],
+    const allowedMonths = [3, 6, 12];
+    const requestedMonths = Number(req.query.months);
+
+    const months = allowedMonths.includes(requestedMonths)
+      ? requestedMonths
+      : 6;
+
+    const { now, startDate } = getDateRange(months);
+
+    const [totals, monthlyResults, expenseBreakdown, savingTrend] =
+      await Promise.all([
+        Transaction.aggregate([
+          {
+            $match: {
+              userId,
+              date: {
+                $gte: startDate,
+                $lt: now,
               },
             },
-            totalExpenses: {
-              $sum: {
-                $cond: [{ $eq: ["$type", "expense"] }, "$amount", 0],
+          },
+          {
+            $group: {
+              _id: null,
+              totalIncome: {
+                $sum: {
+                  $cond: [{ $eq: ["$type", "income"] }, "$amount", 0],
+                },
+              },
+              totalExpenses: {
+                $sum: {
+                  $cond: [{ $eq: ["$type", "expense"] }, "$amount", 0],
+                },
               },
             },
           },
-        },
-      ]),
-      Transaction.aggregate(buildMonthlyTotalsPipeline(userId)),
-      Transaction.aggregate([
-        {
-          $match: {
-            userId,
-            type: "expense",
-            date: {
-              $gte: sixMonthsAgo,
-              $lt: now,
+        ]),
+
+        Transaction.aggregate(
+          buildMonthlyTotalsPipeline(userId, startDate, now)
+        ),
+
+        Transaction.aggregate([
+          {
+            $match: {
+              userId,
+              type: "expense",
+              date: {
+                $gte: startDate,
+                $lt: now,
+              },
             },
           },
-        },
-        {
-          $group: {
-            _id: "$category",
-            totalSpent: { $sum: "$amount" },
+          {
+            $group: {
+              _id: "$category",
+              totalSpent: { $sum: "$amount" },
+            },
           },
-        },
-        {
-          $sort: {
-            totalSpent: -1,
+          {
+            $sort: {
+              totalSpent: -1,
+            },
           },
-        },
-      ]),
-      Transaction.aggregate(buildMonthlyTotalsPipeline(userId, true)),
-    ]);
+        ]),
 
-    const summary = totals[0] || { totalIncome: 0, totalExpenses: 0 };
-    const months = buildMonthList();
+        Transaction.aggregate(
+          buildMonthlyTotalsPipeline(userId, startDate, now, true)
+        ),
+      ]);
 
-    const monthlyAnalytics = months.map((month) => {
-      const result = monthlyResults.find(
-        (item) =>
-          item._id.getFullYear() === month.getFullYear() &&
-          item._id.getMonth() === month.getMonth()
-      );
+    const summary = totals[0] || {
+      totalIncome: 0,
+      totalExpenses: 0,
+    };
+
+    const monthList = buildMonthList(now, months);
+
+    const monthlyResultsMap = new Map(
+      monthlyResults.map((item) => [
+        getMonthKey(item._id),
+        item,
+      ])
+    );
+
+    const monthlyAnalytics = monthList.map((month) => {
+      const monthKey = getMonthKey(month);
+      const result = monthlyResultsMap.get(monthKey);
 
       return {
-        month: `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, "0")}`,
-        totalIncome: result ? result.totalIncome : 0,
-        totalExpenses: result ? result.totalExpenses : 0,
+        month: monthKey,
+        totalIncome: result?.totalIncome ?? 0,
+        totalExpenses: result?.totalExpenses ?? 0,
       };
     });
 
@@ -154,7 +209,8 @@ const getAnalytics = async (req, res, next) => {
     );
 
     const expenseBreakdownAnalytics = expenseBreakdown.map((value) => {
-      const percentage = grandTotal === 0 ? 0 : (value.totalSpent / grandTotal) * 100;
+      const percentage =
+        grandTotal === 0 ? 0 : (value.totalSpent / grandTotal) * 100;
 
       return {
         ...value,
@@ -162,28 +218,29 @@ const getAnalytics = async (req, res, next) => {
       };
     });
 
-    const currentParts = getMonthKey(now).split("-");
-    const year = Number(currentParts[0]);
-    const savingMonth = Number(currentParts[1]) - 1;
-    const savingMonths = buildMonthList(new Date(Date.UTC(year, savingMonth, 1)), true).map((month) =>
-      getMonthKey(month)
-    );
-
     const resultsMap = new Map(
-      savingTrend.map((item) => [getMonthKey(item._id), item.netSavings])
+      savingTrend.map((item) => [
+        getMonthKey(item._id),
+        item.netSavings,
+      ])
     );
 
-    const savingTrendAnalytics = savingMonths.map((month) => ({
-      month,
-      netSavings: resultsMap.get(month) ?? 0,
-    }));
+    const savingTrendAnalytics = monthList.map((month) => {
+      const monthKey = getMonthKey(month);
+
+      return {
+        month: monthKey,
+        netSavings: resultsMap.get(monthKey) ?? 0,
+      };
+    });
 
     return res.status(200).json({
       success: true,
       data: {
         totalIncome: summary.totalIncome || 0,
         totalExpenses: summary.totalExpenses || 0,
-        totalBalance: (summary.totalIncome || 0) - (summary.totalExpenses || 0),
+        totalBalance:
+          (summary.totalIncome || 0) - (summary.totalExpenses || 0),
         monthlyAnalytics,
         expenseBreakdownAnalytics,
         savingTrendAnalytics,
